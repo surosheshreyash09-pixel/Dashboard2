@@ -1,0 +1,110 @@
+name: Auto Unassign After 5 Days
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # daily
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                ...context.repo,
+                state: "open"
+              }
+            );
+
+            const now = new Date();
+
+            for (const issue of issues) {
+              if (!issue.assignees.length) continue;
+
+              const comments = await github.rest.issues.listComments({
+                ...context.repo,
+                issue_number: issue.number,
+              });
+
+              const expiryComment = comments.data.find(c =>
+                c.body.includes("Assigned to") && c.body.includes("until")
+              );
+
+              if (!expiryComment) continue;
+
+              const match = expiryComment.body.match(/until (.*)/);
+              if (!match) continue;
+
+              const expiryDate = new Date(match[1]);
+
+              if (now > expiryDate) {
+                const assignees = issue.assignees.map(a => a.login);
+
+                await github.rest.issues.removeAssignees({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  assignees,
+                });
+
+                await github.rest.issues.removeLabel({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  name: 'in-progress'
+                }).catch(() => {});
+
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  body: `⏳ Assignment expired. Issue is now open again.`
+                });
+              }
+            }
+
+  unassign_on_command:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '/unassign')
+
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.issue;
+            
+            if (!context.payload.issue.assignees.length) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: issue.number,
+                body: `ℹ️ This issue is not assigned to anyone.`
+              });
+              return;
+            }
+
+            const assignees = context.payload.issue.assignees.map(a => a.login);
+
+            await github.rest.issues.removeAssignees({
+              ...context.repo,
+              issue_number: issue.number,
+              assignees,
+            });
+
+            await github.rest.issues.removeLabel({
+              ...context.repo,
+              issue_number: issue.number,
+              name: 'in-progress'
+            }).catch(() => {});
+
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: issue.number,
+              body: `✅ Issue unassigned from ${assignees.join(', ')}`
+            });
